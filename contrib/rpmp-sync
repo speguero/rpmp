@@ -1,0 +1,32 @@
+#!/bin/sh -u
+
+rpi_ssh_host="rpi"
+dpath_music_src="$HOME/Music/"
+
+sync()
+{
+	rsync \
+		-vrpP \
+		-e ssh \
+		--delete \
+		--ignore-existing \
+		--owner=1000 \
+		--group=1000 \
+		"$dpath_music_src" \
+		"$rpi_ssh_host":~/Music/
+}
+
+case "$@" in
+	-1)
+		sync
+		;;
+	
+	*)
+		while true
+		do
+			sync
+			ssh "$rpi_ssh_host" ffplay -f lavfi -i 'sine=frequency=1500:duration=0.025' -autoexit -nodisp -loglevel quiet > /dev/null 2>&1
+			sleep 5
+		done
+		;;
+esac

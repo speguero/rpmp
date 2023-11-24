@@ -1,0 +1,712 @@
+#!/bin/sh
+
+#            :::::::::    :::::::::     :::   :::    :::::::::  
+#           :+:     :+:  :+:    :+:   :+:+: :+:+:   :+:    :+: 
+#          +:+     +:+  +:+    +:+  +:+ +:+:+ +:+  +:+    +:+  
+#         +#++::++#:   +#++:++#+   +#+  +:+  +#+  +#++:++#+    
+#        +#+     +#+  +#+         +#+       +#+  +#+           
+#       #+#     #+#  #+#         #+#       #+#  #+#            
+#      ###     ###  ###         ###       ###  ###             
+#
+#                                    raspberry pi music player
+#                                    -         -  -     -
+#  MIT License
+#  Copyright (c) 2022-2023 Steven Peguero
+#
+#  Permission is hereby granted, free of charge, to any person obtaining a copy
+#  of this software and associated documentation files (the "Software"), to deal
+#  in the Software without restriction, including without limitation the rights
+#  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+#  copies of the Software, and to permit persons to whom the Software is
+#  furnished to do so, subject to the following conditions:
+#
+#  The above copyright notice and this permission notice shall be included in all
+#  copies or substantial portions of the Software.
+#
+#  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+#  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+#  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+#  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+#  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+#  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+#  SOFTWARE.
+
+arg="$(printf '%s\n' "$*" | awk '{$1=""; print}' | sed 's/^[[:space:]]*//g')"
+prereq_stop="rpmp fzf mpv"
+prereq_cont="espeak sox"
+
+RPMP_DPATH_CACHE="${RPMP_DPATH_CACHE-"${HOME}/.cache/rpmp"}"
+RPMP_DPATH_CONF="${RPMP_DPATH_CONF-"${HOME}/.config/rpmp"}"
+RPMP_DPATH_MPV_WL="${RPMP_DPATH_MPV_WL-"${RPMP_DPATH_CACHE}/playback"}"
+RPMP_DPATH_MUSIC="${RPMP_DPATH_MUSIC-"${HOME}/Music"}"
+RPMP_FPATH_PLAYLIST="${RPMP_FPATH_PLAYLIST-"${RPMP_DPATH_CACHE}/playlist"}"
+
+show_dname_filter()
+{
+	#  shows recursive and interactive list of subdirectories to play.
+
+	opt()
+	{
+		if printf '%s' "$1" | grep -q "$2"
+		then
+			return 0
+		else
+			return 1
+		fi
+	}
+
+	local opt="$(printf '%s' "$*" | awk '{print $1}' | grep -o '^\-[a-zA-Z0-9]*')"
+	local str="$(printf '%s' "$*" | sed 's/^\-[a-zA-Z0-9]*//g' | sed 's/^[[:space:]]*//g')"
+
+	local opt_q=
+
+	local dpath_music="${RPMP_DPATH_MUSIC}"
+	local fzf_preview=
+
+	if opt "${opt}" q
+	then
+		#  disables selection-based tts / sound effects.
+		opt_q='-q'
+
+		(play_sound select &)
+	else
+		fzf_preview='rpmp play-tts {} && rpmp play-sound select'
+
+		if [ -n "${str}" ]
+		then
+			(play_sound select &)
+		fi
+	fi
+
+	set_term_title
+
+	find -L "${dpath_music}" -type d | \
+	cut -d '/' -f "$(print_cut_field_selection_number)" | sed '/^$/d' | sed '1i\
+.
+	' | sort -r | \
+	fzf -i -s -m -e \
+		--header 'rpmp (dir)' \
+		--header-first \
+		--border rounded \
+		--color fg:15,fg+:0,bg+:10,hl:9,hl+:1,border:11,gutter:1,header:11,prompt:7,info:8,query:15 \
+		--prompt '> ' \
+		--algo v1 \
+		--query "${str}" \
+		--literal \
+		--cycle \
+		--tac \
+		--layout reverse \
+		--preview "${fzf_preview}" \
+		--preview-window 0% \
+		--bind 'enter:execute(       rpmp rmwl; rpmp play -ds {}; rpmp play-sound select)' \
+		--bind 'double-click:execute(rpmp rmwl; rpmp play -ds {}; rpmp play-sound select)' \
+		--bind 'change:first' \
+		--bind 'bspace:clear-query' \
+		--bind 'home:first' \
+		--bind 'end:last' \
+		--bind 'esc:abort' \
+		--bind 'tab:abort' \
+		--bind 'insert:execute-silent(rpmp play-sound filter)+execute(rpmp file)+execute-silent(rpmp play-sound filter)' \
+		--bind 'alt-q:abort' \
+		--bind 'ctrl-q:abort' \
+		--bind 'f5:execute-silent(rpmp play-sound filter)+execute(rpmp file)+execute-silent(rpmp play-sound filter)' \
+		--bind 'f6:execute(rpmp play; rpmp play-sound select)' \
+		--bind '*:execute(rpmp play; rpmp play-sound select)' \
+		--bind "f7:reload(rpmp dir ${opt_q})+abort"
+}
+
+show_fpath_filter()
+{
+	#  shows recursive and interactive list of files to play.
+
+	local str="$(printf '%s' "$*" | sed 's/^\-[a-zA-Z0-9]*//g' | sed 's/^[[:space:]]*//g')"
+
+	local cmd_rpmp_quit='10_cmd_filter_quit'
+	local cmd_rpmp_refresh='20_cmd_filter_refresh'
+	local cmd_rpmp_resume_playback='30_cmd_resume_playback'
+	local dpath_music="${RPMP_DPATH_MUSIC}"
+	local fpath_playlist="${RPMP_FPATH_PLAYLIST}"
+	local i=0
+	local int_modtime_plist_preloop="$(get_file_modtime "${fpath_playlist}")"
+	local int_modtime_plist_postloop=
+
+	set_term_title
+	(play_sound select &)
+
+	find -L "${dpath_music}" -type f | \
+	cut -d '/' -f "$(print_cut_field_selection_number)" | sed '/^$/d' | sort -r | \
+	fzf -i -s -m -e \
+		--header 'rpmp (file)' \
+		--header-first \
+		--border rounded \
+		--color fg:15,fg+:0,bg+:10,hl:9,hl+:1,border:11,gutter:12,header:11,prompt:7,info:8,query:15 \
+		--prompt '> ' \
+		--algo v1 \
+		--query "${str}" \
+		--literal \
+		--cycle \
+		--tac \
+		--header-lines 0 \
+		--layout reverse \
+		--bind 'enter:select-all+accept' \
+		--bind 'double-click:select-all+accept' \
+		--bind 'change:first' \
+		--bind 'backward-eof:execute-silent(rpmp play-sound clear)' \
+		--bind 'alt-bspace:clear-query' \
+		--bind 'home:first' \
+		--bind 'end:last' \
+		--bind "esc:execute(printf '%s\n'    ${cmd_rpmp_quit})+abort" \
+		--bind "tab:execute(printf '%s\n'    ${cmd_rpmp_quit})+abort" \
+		--bind "insert:execute(printf '%s\n' ${cmd_rpmp_quit})+abort" \
+		--bind "alt-q:execute(printf '%s\n'  ${cmd_rpmp_quit})+abort" \
+		--bind "ctrl-q:execute(printf '%s\n' ${cmd_rpmp_quit})+abort" \
+		--bind "f5:execute(printf '%s\n'     ${cmd_rpmp_quit})+abort" \
+		--bind "f6:execute(printf '%s\n'     ${cmd_rpmp_resume_playback})+abort" \
+		--bind "*:execute(printf '%s\n'      ${cmd_rpmp_resume_playback})+abort" \
+		--bind "f7:execute(printf '%s\n'     ${cmd_rpmp_refresh})+abort" | ( \
+
+		#  until `fzf` intuitively enables the processing of multi-line
+		#  output, a while-read subshell, along with case and return
+		#  statements, must be facilitated to mimick said program as it
+		#  would normally behave (when handling single-line output).
+
+		while read -r f
+		do
+			if [ ${i} -eq 0 ]
+			then
+				case "${f}" in
+					"${cmd_rpmp_quit}")
+						return 10
+						;;
+					"${cmd_rpmp_refresh}")
+						return 20
+						;;
+					"${cmd_rpmp_resume_playback}")
+						return 30
+						;;
+					*)
+						rm -f "${fpath_playlist}"
+						;;
+				esac
+			fi
+
+			if [ ${i} -eq 200 ]  #  if 200th playlist item is processed (indicating playback delay).
+			then
+				play_sound init
+			fi
+
+			#  create absolute path and add to playlist file:
+			printf '%s/%s\n' "${dpath_music}" "${f}" >> "${fpath_playlist}"
+			i=$((${i}+1))
+
+			continue
+		done
+
+		return 0
+	)
+
+	case "$?" in
+		10)
+			return 0
+			;;
+		20)
+			return 100
+			;;
+		30)
+			play_music
+			return 100
+			;;
+		*)
+			int_modtime_plist_postloop="$(get_file_modtime "${fpath_playlist}")"
+
+			if [ "${int_modtime_plist_postloop}" != "${int_modtime_plist_preloop}" ]
+			then
+				remove_mpvwl_cache
+				play_music -s
+				return 100
+			else
+				return 0
+			fi
+	esac
+}
+
+play_music()
+{
+	#  plays contents of playlist file.
+
+	opt()
+	{
+		if printf '%s' "$1" | grep -q "$2"
+		then
+			return 0
+		else
+			return 1
+		fi
+	}
+
+	pkill -x espeak
+	pkill -x play
+
+	local opt="$(printf '%s' "$*" | awk '{print $1}' | grep -o '^\-[a-zA-Z0-9]*')"
+	local str="$(printf '%s' "$*" | sed 's/^\-[a-zA-Z0-9]*//g' | sed 's/^[[:space:]]*//g')"
+	local sys="$(uname -s | tr '[:upper:]' '[:lower:]')"
+
+	local dpath_cache="${RPMP_DPATH_CACHE}"
+	local dpath_conf="${RPMP_DPATH_CONF}"
+	local dpath_mpv_wl="${RPMP_DPATH_MPV_WL}"
+	local dpath_music="${RPMP_DPATH_MUSIC}"
+	local dpath_filter_selection=
+	local fpath_mpv_input_conf="${dpath_conf}/input.conf"
+	local fpath_mpv_wl_autosave_script="${dpath_cache}/autosave.lua"
+	local fpath_playlist="${RPMP_FPATH_PLAYLIST}"
+
+	clear
+
+	if opt "${opt}" d && [ -n "${str}" ]
+	then
+		#  create playlist file using dir filter selection.
+
+		if [ -d "${dpath_music}/${str}" ]
+		then
+			dpath_filter_selection="$(realpath "${dpath_music}/${str}")"
+			find -L "${dpath_filter_selection}" -type f > "${fpath_playlist}"
+		else
+			return 1
+		fi
+	fi
+
+	if ! [ -f "${fpath_mpv_wl_autosave_script}" ]
+	then
+		if ! print_mpv_wl_autosave_script > "${fpath_mpv_wl_autosave_script}"
+		then
+			printf 'rpmp: unable to create mpv watch_later autosave script: %s\n' "${fpath_mpv_wl_autosave_script}" >&2
+		fi
+	fi
+
+	if ! [ -f "${fpath_mpv_input_conf}" ]
+	then
+		if ! touch "${fpath_mpv_input_conf}"
+		then
+			printf 'rpmp: unable to create mpv input configuration file: %s\n' "${fpath_mpv_input_conf}" >&2
+		fi
+	fi
+
+	if [ -f "${fpath_playlist}" ]
+	then
+
+		if opt "${opt}" s
+		then
+			#  shuffle playlist content.
+			sort -R "${fpath_playlist}" -o "${fpath_playlist}"
+		fi
+
+		case "${sys}" in
+			darwin|linux)
+				printf '%srpmp: initializing... (⌐■_■)%s\n' \
+					"$(tput bold)" "$(tput sgr0)"
+				;;
+			*)
+				printf '%srpmp: initializing... %s\n' \
+					"$(tput bold)" "$(tput sgr0)"
+				;;
+		esac
+		
+		if ! opt "${opt}" q
+		then
+			#  play "play" sound effect; otherwise, suppress.
+			play_sound play
+		fi
+
+		mpv \
+			--af-add=scaletempo=speed=both \
+			--audio-pitch-correction=no \
+			--display-tags= \
+			--input-conf="${fpath_mpv_input_conf}" \
+			--loop-playlist=inf \
+			--msg-level=all=no,term-msg=status,statusline=status,cplayer=error,ffmpeg=fatal,ffmpeg/demuxer=error \
+			--no-audio-display \
+			--no-video \
+			--playlist="${fpath_playlist}" \
+			--save-position-on-quit \
+			--script="${fpath_mpv_wl_autosave_script}" \
+			--term-playing-msg='\nPlaying: ${filename}\n' \
+			--term-title='rpmp' \
+			--vo=null \
+			--volume-max=100 \
+			--video=no \
+			--watch-later-directory="${dpath_mpv_wl}" \
+			--watch-later-options=volume,speed,pause,loop-file \
+			--watch-later-options-remove=mute,ab-loop \
+			"$()"
+	else
+		printf 'rpmp: playlist file not found: %s\n' "${fpath_playlist}" >&2
+		return 2
+	fi
+}
+
+check_prerequisites()
+{
+	#  ensures program prerequisites are in ${PATH}.
+
+	local err=0
+	local i=               #   last program will not process without
+	local programs="$* -"  # < placeholder at end of string.
+
+	printf '%s' "${programs}" | tr '[:space:]' '\n' | ( \
+
+		while read -r i
+		do
+			if ! command -v "${i}" > /dev/null 2>&1
+			then
+				if [ ${err} -eq 0 ]
+				then
+					printf 'rpmp: prerequisite programs not found in $PATH:\n' >&2
+					err=1
+				fi
+				
+				printf '%s\n' " - ${i}" >&2
+			fi
+		done
+
+		return "${err}"
+	)
+
+	return $?
+}
+
+create_program_dirs()
+{
+	#  create directories for program usage.
+
+	local dpath_cache="${RPMP_DPATH_CACHE}"
+	local dpath_conf="${RPMP_DPATH_CONF}"
+	local dpath_mpv_wl="${RPMP_DPATH_MPV_WL}"
+
+	if ! [ -d "${dpath_cache}" ]
+	then
+		if ! mkdir -p "${dpath_cache}"
+		then
+			printf 'rpmp: unable to create cache directory: %s\n' "${dpath_cache}" >&2
+			return 2
+		fi
+	fi
+
+	if ! [ -d "${dpath_conf}" ]
+	then
+		if ! mkdir -p "${dpath_conf}"
+		then
+			printf 'rpmp: unable to create config directory: %s\n' "${dpath_conf}" >&2
+		fi
+	fi
+
+	if ! [ -d "${dpath_mpv_wl}" ]
+	then
+		if ! mkdir -p "${dpath_mpv_wl}"
+		then
+			printf 'rpmp: unable to create mpv watch_later directory: %s\n' "${dpath_mpv_wl}" >&2
+		fi
+	fi
+
+	return 0
+}
+
+get_file_modtime()
+{
+	#  gets modified epoch timestamp of file.
+
+	local f="$1"
+	local modtime=
+	local sys="$(uname -s | tr '[:upper:]' '[:lower:]')"
+
+	if ! [ -f "${f}" ]
+	then
+		printf 0
+		return 1
+	fi
+
+	case "${sys}" in
+		linux)
+			modtime="$(stat -c %Y "${f}")"
+			printf '%s' "${modtime}"
+			;;
+		openbsd|*)
+			modtime="$(stat -f %m "${f}")"
+			printf '%s' "${modtime}"
+			;;
+	esac
+
+	return 0
+}
+
+play_sound()
+{
+	#  produces sound effects for auditory navigation.
+
+	if ! command -v sox > /dev/null 2>&1
+	then
+		return 1
+	fi
+
+	case "$1" in
+		select)
+			play -qn synth sine 2000 trim 0 0.05 gain -30
+			;;
+		filter)
+			play -qn synth sine 1500 trim 0 0.05 gain -30
+			;;
+		play)
+			play -qn synth sine 1000 trim 0 0.05 gain -30
+			;;
+		init)
+			play -qn synth sine 0500 trim 0 0.05 gain -20
+			;;
+		clear)
+			play -qn synth sine 0200 trim 0 0.05 gain -20
+			;;
+	esac
+
+	return 0
+}
+
+play_tts()
+{
+	#  enables text-to-speech auditory navigation for car stereos.
+
+	local str="$*"
+	local sys="$(uname -s | tr '[:upper:]' '[:lower:]')"
+
+	if ! command -v espeak > /dev/null 2>&1
+	then
+		return 1
+	fi
+
+	case "${sys}" in
+		linux)
+			printf '%s' "${str}" | sed 's/\//, /g' | espeak -a 100 -s 300 || return 1
+			;;
+		*)
+			printf '%s' "${str}" | sed 's/\//, /g' | espeak -a 100 -s 235 || return 1
+			;;
+	esac
+}
+
+print_cut_field_selection_number()
+{
+	#  posix solution to count number of directory levels in
+	#  ${RPMP_DPATH_MUSIC}; facilitates removal of ${RPMP_DPATH_MUSIC}
+	#  from filter lists via `cut`.
+
+	local dpath_music="${RPMP_DPATH_MUSIC}"
+	local int_dpath_sections="$(( $(printf '%s' "${dpath_music}" | sed 's/\// /g' | wc -w) + 2 ))"
+
+	printf '%s-' "${int_dpath_sections}" && \
+		return 0
+}
+
+print_mpv_wl_autosave_script()
+{
+	cat <<EOF
+
+-- autosave.lua
+-- ------------
+-- 
+-- periodically saves watch_later data during mpv playback.
+-- accounts for periodic cached write synchronization on raspberry pi.
+
+os        = require 'os'
+mp        = require 'mp'
+mp_opt    = require 'mp.options'
+timer_opt = {save_period = 15} -- seconds per mpv watch_later cache save.
+raspi     = false
+
+function platform()
+
+	-- gets running platform / os.
+
+	local out = io.popen('uname -s')
+	local sys = out:read '*line'
+
+	io.close(out)
+	return sys:lower()
+end
+
+function raspi_write_sync()
+
+	-- synchronizes watch_later cache to raspberry pi storage device.
+	
+	local f = nil
+	
+	if raspi == true then
+		os.execute('sync')
+		return true
+	end
+
+	-- raspberry pi os:
+	if platform() == 'linux' then
+		f = io.open('/sys/firmware/devicetree/base/model', 'r')
+	end
+
+	if f ~= nil then
+		str = f:read '*a'
+		io.close(f)
+	else
+		return false
+	end
+
+	if string.match(str, '^Raspberry Pi') then
+		raspi = true
+		os.execute('sync')
+		return true
+	else
+		return false
+	end
+end
+
+function add_wl()
+	mp.commandv('write-watch-later-config')
+	raspi_write_sync()
+end
+
+function del_wl(data)
+	if data.reason == 'eof' or data.reason == 'stop' then
+		local playlist = mp.get_property_native('playlist')
+		
+		for i, entry in pairs(playlist) do
+			if entry.id == data.playlist_entry_id then
+				mp.commandv('delete-watch-later-config', entry.filename)
+				raspi_write_sync()
+			end
+		end
+	end
+end
+
+mp_opt.read_options(timer_opt)
+save_period_timer = mp.add_periodic_timer(timer_opt.save_period, add_wl)
+
+mp.register_event('file-loaded', add_wl)
+mp.register_event('start-file',  add_wl)
+mp.register_event('end-file',    del_wl)
+EOF
+	
+	return 0
+}
+
+print_usage()
+{
+	cat <<EOF
+usage: rpmp [d|f|p|dir|file|play] [-qs] [query]
+
+  dir, d [-q] [query]
+      Display recursive list of subdirectories to play within default
+      music directory or RPMP_DPATH_MUSIC.
+
+  |   -q  Disable selection tone and text-to-speech (tts).
+
+  file, f [query]
+      Display recursive list of files to play within default music
+      directory or RPMP_DPATH_MUSIC.
+
+  play, p [-qs]
+      Resume music playback of cached playlist file.
+
+  |   -q  Suppress initialization tone.
+  |   -s  Shuffle cached playlist content.
+EOF
+
+	return 1
+}
+
+remove_mpvwl_cache()
+{
+	#  deletes mpv watch_later cache.
+
+	set -u
+
+	local dpath_mpv_wl="${RPMP_DPATH_MPV_WL}"
+
+	if rm -f "${dpath_mpv_wl}"/* > /dev/null 2>&1
+	then
+		return 0
+	else
+		printf 'rpmp: playback cache files stored within "%s" could not be deleted.\n' \
+			"${dpath_mpv_wl}" >&2
+		return 1
+	fi
+}
+
+set_term_title()
+{
+	printf "\033]0;rpmp\007"  
+}
+
+if ! check_prerequisites "${prereq_stop}"
+then
+	exit 2
+fi
+
+if ! check_prerequisites "${prereq_cont}"
+then
+	printf '\nrpmp: continuing...\n' >&2
+fi
+
+if ! create_program_dirs
+then
+	exit 2
+fi
+
+if ! [ -d "${RPMP_DPATH_MUSIC}" ]
+then
+	printf 'rpmp: music directory not found: %s\n' "${RPMP_DPATH_MUSIC}" >&2
+	exit 2
+fi
+
+case "$1" in
+	d|dir)
+		show_dname_filter "${arg}"
+		exit $?
+		;;
+	f|file)
+		while :
+		do
+			show_fpath_filter "${arg}"
+
+			case "$?" in
+				100)
+					continue
+					;;
+				*)
+					exit $?
+					;;
+			esac
+		done
+		;;
+	h|-h|help)
+		print_usage
+		exit $?
+		;;
+	p|play)
+		play_music "${arg}"
+		exit $?
+		;;
+	play-sound)
+		play_sound "${arg}"
+		exit $?
+		;;
+	play-tts)
+		play_tts "${arg}"
+		exit $?
+		;;
+	rmwl)
+		remove_mpvwl_cache
+		exit $?
+		;;
+	*)
+		if [ -f "${RPMP_FPATH_PLAYLIST}" ]
+		then
+			play_music "$1"
+		fi
+
+		show_dname_filter
+		exit $?
+		;;
+esac

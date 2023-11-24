@@ -1,0 +1,47 @@
+#!/bin/sh -ue
+
+wifi_on()
+{
+	printf "%s" "$(basename "$0") on" > "$FPATH_WIFI_LASTCMD"
+
+	if ! wpa_cli ping > /dev/null 2>&1
+	then
+		sudo systemctl restart dhcpcd.service && \
+			espeak -a 250 'wifi: yes'
+	fi
+}
+
+wifi_off()
+{
+	printf "%s" "$(basename "$0") off" > "$FPATH_WIFI_LASTCMD"
+
+	if wpa_cli ping > /dev/null 2>&1
+	then
+		wpa_cli terminate && \
+			espeak -a 250 'wifi: no'
+	fi
+}
+
+if ! which wpa_cli > /dev/null 2>&1
+then
+	exit 2
+fi
+
+case "$@" in
+	on)
+		wifi_on
+		;;
+	
+	off)
+		wifi_off
+		;;
+	
+	*)
+		if wpa_cli ping > /dev/null 2>&1
+		then
+			wifi_off
+		else
+			wifi_on
+		fi
+		;;
+esac
